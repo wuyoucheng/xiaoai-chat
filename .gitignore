@@ -1,0 +1,10 @@
+.env
+.mi.token
+.otp_code
+__pycache__/
+*.pyc
+*.log
+test_*.mp3
+小爱音箱.jpg
+create_startup.ps1
+start.bat
