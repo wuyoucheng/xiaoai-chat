@@ -56,11 +56,16 @@ class XiaoAiSpeaker:
 
         for attempt in range(3):
             try:
-                async with self.account.request(url, cookies=cookies, headers=headers) as r:
-                    if r.status != 200:
-                        logger.debug(f"API 返回状态: {r.status}")
-                        return None
-                    resp = await r.json(content_type=None)
+                async def do_request():
+                    async with self.account.request(url, cookies=cookies, headers=headers) as r:
+                        if r.status != 200:
+                            logger.debug(f"API 返回状态: {r.status}")
+                            return None
+                        return await r.json(content_type=None)
+
+                resp = await asyncio.wait_for(do_request(), timeout=10.0)
+                if resp is None:
+                    return None
 
                 if resp.get("code") != 0:
                     logger.debug(f"API code: {resp.get('code')}")
@@ -85,6 +90,13 @@ class XiaoAiSpeaker:
                 logger.debug(f"云端检测到提问: {query} (ts={ts})")
                 return query, ts
 
+            except asyncio.TimeoutError:
+                if attempt < 2:
+                    logger.debug(f"API 超时 (尝试 {attempt+1}/3)")
+                    await asyncio.sleep(2)
+                else:
+                    logger.warning(f"API 超时 (已重试3次)")
+                    return None
             except Exception as e:
                 if attempt < 2:
                     logger.debug(f"获取对话失败 (尝试 {attempt+1}/3): {e}")
