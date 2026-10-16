@@ -74,12 +74,9 @@ async def generate_tts(text: str, retries: int = 3) -> tuple[str, float] | None:
             pass
 
     if not filepath.exists():
-        ipv4_connector = aiohttp.TCPConnector(family=socket.AF_INET)
         for attempt in range(retries):
             try:
-                communicate = edge_tts.Communicate(
-                    text, TTS_VOICE, connector=ipv4_connector,
-                )
+                communicate = edge_tts.Communicate(text, TTS_VOICE)
                 await communicate.save(str(filepath))
                 logger.info(f"TTS 音频已生成: {filepath.name} ({filepath.stat().st_size} bytes)")
                 break
@@ -87,7 +84,6 @@ async def generate_tts(text: str, retries: int = 3) -> tuple[str, float] | None:
                 logger.warning(f"edge-tts 生成失败 (尝试 {attempt+1}/{retries}): {e}")
                 if attempt < retries - 1:
                     await asyncio.sleep(1)
-                    ipv4_connector = aiohttp.TCPConnector(family=socket.AF_INET)
                 else:
                     logger.error(f"edge-tts 生成最终失败")
                     return None
