@@ -1,6 +1,10 @@
 import asyncio
 import logging
+import ssl
 from time import time
+
+# Python 3.14 SSL 验证更严格，绕过证书问题
+ssl._create_default_https_context = ssl._create_unverified_context
 
 import config
 from xiaoai import create_speakers, XiaoAiSpeaker
@@ -86,12 +90,28 @@ async def _poll_loop(speaker: XiaoAiSpeaker, processed: set, state: dict):
                 )
 
                 operation_keywords = [
-                    "播放", "放歌", "听音乐", "打开", "关闭", "关掉", "开启",
-                    "停止", "暂停", "设置", "调节", "调高", "调低", "变大", "变小",
-                    "亮一点", "暗一点", "大声", "小声", "音量", "声音",
-                    "天气", "温度", "下雨", "下雪", "晴天", "阴天",
+                    # 音乐/音频控制
+                    "播放", "放歌", "听音乐", "切歌", "关歌", "下一首", "上一首", "换歌", "跳过",
+                    "暂停", "停止", "音量", "声音", "大声", "小声", "调高", "调低",
+                    # 设备开关
+                    "打开", "关闭", "关掉", "开启",
+                    # 环境调节
+                    "设置", "调节", "变大", "变小", "亮一点", "暗一点",
+                    "温度", "湿度", "亮度",
+                    # 天气
+                    "天气", "下雨", "下雪", "晴天", "阴天",
+                    # 清洁设备
                     "扫地", "清扫", "回充",
-                    "空调", "暖气", "制冷", "制热"
+                    # 空调/暖通
+                    "空调", "暖气", "制冷", "制热", "风扇", "吹风",
+                    # 电视/媒体
+                    "电视", "电影", "视频",
+                    # 灯光
+                    "灯", "开灯", "关灯",
+                    # 厨房电器
+                    "电饭煲", "微波炉", "烤箱", "洗碗机",
+                    # 其他家电
+                    "洗衣机", "冰箱", "窗帘", "门窗", "热水器", "浴霸"
                 ]
                 is_operation = any(kw in query for kw in operation_keywords)
 
