@@ -4,7 +4,8 @@ import os
 import socket
 import tempfile
 import threading
-from http.server import HTTPServer, SimpleHTTPRequestHandler
+import time
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import aiohttp
@@ -22,6 +23,21 @@ _server_started = False
 _server_port = 0
 _server_ip = ""
 
+# 音箱实际来拉流的时间，用来对齐真实播放起点
+_fetch_times: dict[str, float] = {}
+
+
+async def wait_fetch(name: str, timeout: float = 3.0, tick: float = 0.05) -> float | None:
+    """等音箱请求指定文件，返回请求时刻；超时返回 None"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        t = _fetch_times.get(name)
+        if t is not None:
+            return t
+        await asyncio.sleep(tick)
+    return None
+
 
 def _get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -38,6 +54,17 @@ class _QuietHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(TTS_DIR), **kwargs)
 
+    def do_GET(self):
+        started = time.time()
+        name = self.path.split("?", 1)[0].lstrip("/")
+        _fetch_times[name] = started
+        rng = self.headers.get("Range", "-")
+        ua = (self.headers.get("User-Agent") or "")[:30]
+        super().do_GET()
+        logger.info(
+            f"HTTP {self.path} Range={rng} UA={ua} 用时{time.time() - started:.2f}s"
+        )
+
     def log_message(self, format, *args):
         pass
 
@@ -47,7 +74,7 @@ def _start_server():
     if _server_started:
         return
 
-    server = HTTPServer(("0.0.0.0", 0), _QuietHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", 0), _QuietHandler)
     _server_port = server.server_address[1]
     _server_ip = _get_local_ip()
 
@@ -55,6 +82,18 @@ def _start_server():
     thread.start()
     _server_started = True
     logger.info(f"TTS 文件服务已启动: http://{_server_ip}:{_server_port}")
+
+
+def ensure_server() -> tuple[str, int]:
+    """确保本地文件服务已启动，返回 (ip, port)"""
+    _start_server()
+    return _server_ip, _server_port
+
+
+def public_url(filename: str) -> str:
+    """把 TTS_DIR 下的文件名转成可访问 URL"""
+    ip, port = ensure_server()
+    return f"http://{ip}:{port}/{filename}"
 
 
 async def generate_tts(text: str, retries: int = 3) -> tuple[str, float] | None:

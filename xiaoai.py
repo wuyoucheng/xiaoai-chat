@@ -31,6 +31,30 @@ async def file_otp_callback(otp_method: str) -> str:
         await asyncio.sleep(1)
 
 
+_login_lock = asyncio.Lock()
+_last_relogin = 0.0
+
+# 小米接口返回 code=999 表示限流/繁忙，全局退避，避免越打越限
+_busy_until = 0.0
+_busy_count = 0
+_last_busy_warn = 0.0
+
+
+def _note_busy():
+    global _busy_until, _busy_count, _last_busy_warn
+    _busy_count += 1
+    delay = min(60.0, 5.0 * (2 ** min(_busy_count - 1, 4)))
+    _busy_until = max(_busy_until, time() + delay)
+    if time() - _last_busy_warn > 60:
+        _last_busy_warn = time()
+        logger.warning(f"小米接口繁忙(code 999)，全局暂停轮询 {delay:.0f}s")
+
+
+def _note_ok():
+    global _busy_count
+    _busy_count = 0
+
+
 class XiaoAiSpeaker:
     def __init__(self, account: MiAccount, service: MiNAService,
                  device_id: str, hardware: str, name: str = ""):
@@ -41,35 +65,66 @@ class XiaoAiSpeaker:
         self.name = name
         self._last_timestamp_ms: int = 0
 
+    async def _relogin(self) -> bool:
+        """token 过期后重新登录（多设备共用账号，60 秒内只刷一次）"""
+        global _last_relogin
+        async with _login_lock:
+            if time() - _last_relogin < 60:
+                return True
+            logger.warning("serviceToken 可能已过期，重新登录小米账号")
+            try:
+                ok = await self.account.login("micoapi")
+            except Exception as e:
+                logger.error(f"重新登录异常: {e}")
+                return False
+            _last_relogin = time()
+            if ok and self.account.token_store and self.account.token:
+                await self.account.token_store.save_token(self.account.token)
+            logger.info(f"重新登录{'成功' if ok else '失败'}")
+            return ok
+
     async def get_latest_ask(self) -> tuple[str, int] | None:
         """通过云端对话历史 API 获取最新一条用户提问"""
+        if time() < _busy_until:
+            await asyncio.sleep(_busy_until - time())
+
         url = CONVERSATION_API.format(
             hardware=self.hardware,
             timestamp=int(time() * 1000),
         )
-        cookies = {
-            "userId": self.account.token["userId"],
-            "serviceToken": self.account.token["micoapi"][1],
-            "deviceId": self.device_id,
-        }
         headers = {"User-Agent": UA_MINA}
 
         for attempt in range(3):
+            cookies = {
+                "userId": self.account.token["userId"],
+                "serviceToken": self.account.token["micoapi"][1],
+                "deviceId": self.device_id,
+            }
             try:
                 async def do_request():
                     async with self.account.request(url, cookies=cookies, headers=headers) as r:
+                        if r.status in (401, 403):
+                            return {"__auth__": r.status}
                         if r.status != 200:
-                            logger.debug(f"API 返回状态: {r.status}")
+                            body = (await r.text())[:200]
+                            logger.warning(f"API 返回状态: {r.status} {body}")
                             return None
                         return await r.json(content_type=None)
 
                 resp = await asyncio.wait_for(do_request(), timeout=10.0)
                 if resp is None:
                     return None
+                if "__auth__" in resp:
+                    await self._relogin()
+                    continue
 
                 if resp.get("code") != 0:
-                    logger.debug(f"API code: {resp.get('code')}")
+                    if resp.get("code") == 999:
+                        _note_busy()
+                    else:
+                        logger.warning(f"API code: {resp.get('code')} {str(resp.get('message', ''))[:100]}")
                     return None
+                _note_ok()
 
                 data_str = resp.get("data", "")
                 if not data_str:
@@ -121,14 +176,19 @@ class XiaoAiSpeaker:
             logger.error(f"[{self.name}] TTS 失败: {e}")
 
     async def play_audio_url(self, url: str):
-        """通过音乐通道播放音频 URL（可能在空闲状态下也有效）"""
-        try:
-            result = await self.service.play_by_music_url(self.device_id, url)
-            logger.info(f"[{self.name}] 音乐通道播放: {url[:80]}... (result={result})")
-            return result
-        except Exception as e:
-            logger.error(f"[{self.name}] 音乐通道播放失败: {e}")
-            return False
+        """通过音乐通道播放音频 URL；网络抖动时重试，避免整首歌中断"""
+        for attempt in range(3):
+            try:
+                result = await self.service.play_by_music_url(self.device_id, url)
+                logger.info(f"[{self.name}] 音乐通道播放: {url[:80]}... (result={result})")
+                return result
+            except Exception as e:
+                if attempt == 2:
+                    logger.error(f"[{self.name}] 音乐通道播放失败: {e}")
+                    return False
+                logger.warning(f"[{self.name}] 音乐通道异常，重试({attempt + 1}/2): {e}")
+                await asyncio.sleep(0.4 * (attempt + 1))
+        return False
 
     async def stop_playback(self):
         """停止当前播放"""
@@ -139,6 +199,40 @@ class XiaoAiSpeaker:
         except Exception as e:
             logger.error(f"[{self.name}] 停止播放失败: {e}")
             return False
+
+    async def pause_playback(self):
+        try:
+            result = await self.service.player_pause(self.device_id)
+            logger.info(f"[{self.name}] 暂停 (result={result})")
+            return result
+        except Exception as e:
+            logger.error(f"[{self.name}] 暂停失败: {e}")
+            return False
+
+    async def resume_playback(self):
+        try:
+            result = await self.service.player_play(self.device_id)
+            logger.info(f"[{self.name}] 继续 (result={result})")
+            return result
+        except Exception as e:
+            logger.error(f"[{self.name}] 继续失败: {e}")
+            return False
+
+    async def set_volume(self, volume: int):
+        try:
+            result = await self.service.player_set_volume(self.device_id, volume)
+            logger.info(f"[{self.name}] 音量 {volume} (result={result})")
+            return result
+        except Exception as e:
+            logger.error(f"[{self.name}] 设置音量失败: {e}")
+            return False
+
+    async def get_status(self) -> dict:
+        try:
+            return await self.service.player_get_status(self.device_id) or {}
+        except Exception as e:
+            logger.debug(f"[{self.name}] 获取播放状态失败: {e}")
+            return {}
 
 
 async def create_speakers() -> list[XiaoAiSpeaker]:

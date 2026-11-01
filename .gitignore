@@ -1,10 +1,15 @@
 .env
-.mi.token
+.mi.token*
 .otp_code
 __pycache__/
 *.pyc
 *.log
+console.err
+console.out
+nohup.out
+song_cache/
 test_*.mp3
+*.flac
 小爱音箱.jpg
 create_startup.ps1
 start.bat
